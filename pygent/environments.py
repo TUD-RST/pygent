@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import animation
 import matplotlib.patches as patches
+from matplotlib.ticker import FuncFormatter, MultipleLocator
 from scipy.integrate import solve_ivp
 import inspect
 import pickle
@@ -93,10 +94,15 @@ class Environment(object):
                 ax[i].step(self.tt, self.history[:, i], 'b',  lw=1)
                 ax[i].set_ylabel(r'$x_'+str(i+1)+'$')
                 ax[i].grid(True)
+                if self.xIsAngle[i]:
+                    ax[i].yaxis.set_major_formatter(FuncFormatter(
+                        lambda val, pos: '{:.0g}$\pi$'.format(val / np.pi) if val != 0 else '0'))
+                    ax[i].yaxis.set_major_locator(MultipleLocator(base=np.pi))
         else:
             ax.step(self.tt, self.history[:, 0], 'b',  lw=1)
             ax.grid(True)
             plt.ylabel(r'$x_1$')
+        fig.align_ylabels(ax)
         plt.xlabel(r't[s]')
         plt.tight_layout()
         # Todo: save data in numpy arrays
@@ -197,19 +203,35 @@ class StateSpaceModel(Environment):
                  terminal_cost=0.):
         super(StateSpaceModel, self).__init__(x0, uDim, dt)
         self.ode = ode
-        cost_args = inspect.signature(cost).parameters.__len__()
+        params = inspect.signature(cost).parameters
+        cost_args = params.__len__()
         if cost_args == 1:
-            self.cost = lambda x_, u_, x, mod: cost(x_)
-        if cost_args == 2:
-            self.cost = lambda x_, u_, x, mod: cost(x_, u_)
-        elif cost_args == 3 and 'mod' in inspect.signature(cost).parameters:
-            self.cost = lambda x_, u_, x, mod: cost(x_, u_, mod)
-        elif cost_args == 3 and 'mod' not in inspect.signature(cost).parameters:
-            self.cost = lambda x_, u_, x, mod: cost(x_, u_, x)
+            self.cost = lambda x_, u_, x, t, mod: cost(x_)
+        elif cost_args == 2:
+            if 'mod' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, mod)
+            elif 't' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, t)
+            else:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_)
+        elif cost_args == 3:
+            if 'mod' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, mod)
+            elif 't' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, t)
+            else:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, x)
         elif cost_args == 4:
+            if 'mod' in params and 't' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, t, mod)
+            elif 'mod' in params and not 't' in params:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, x, mod)
+            else:
+                self.cost = lambda x_, u_, x, t, mod: cost(x_, u_, x, t)
+        elif cost_args == 5:
             self.cost = cost
         else:
-            print('Cost function must to be of the form c(x), c(x, u), c(x_, u_, x), c(x, u, mod) or c(x_, u_, x, mod), where mod is a placeholder for numpy/sympy.')
+            print('Cost function must to be of the form c(x_, u_, x, t, mod), where mod is numpy/sympy.')
             assert(True)
         self.xIsAngle = np.zeros([len(self.x_)], dtype=bool)
         self.o = self.x
@@ -238,7 +260,7 @@ class StateSpaceModel(Environment):
             dt = self.dt
 
         # system simulation
-        sol = solve_ivp(lambda t, x: self.ode(t, x, u), (0, dt), self.x_)
+        sol = solve_ivp(lambda t, x: self.ode(t, x, u), (0, dt), self.x_, 'RK45')
         # todo: only output value of the last timestep
         y = list(sol.y[:, -1])  # extract simulation result
         self.x = y
@@ -246,9 +268,11 @@ class StateSpaceModel(Environment):
         self.history = np.concatenate((self.history, np.array([self.x])))  # save current state
         self.tt.extend([self.tt[-1] + dt])  # increment simulation time
         self.terminated = self.terminate(self.x)
-        x_2pi = mapAngles(self.xIsAngle, self.x_)
-        x2pi = mapAngles(self.xIsAngle, self.x)
-        c = (self.cost(x_2pi, u, x2pi, np) + self.terminal_cost*self.terminated)*dt
+        #x_2pi = mapAngles(self.xIsAngle, self.x_)
+        #x2pi = mapAngles(self.xIsAngle, self.x)
+        #c = (self.cost(x_2pi, u, x2pi, np) + self.terminal_cost*self.terminated)*dt
+        t = self.tt[-1]
+        c = (self.cost(self.x_, u, self.x, t, np) + self.terminal_cost * self.terminated) * dt
         return c
 
     def terminate(self, x):
@@ -293,9 +317,8 @@ class StateSpaceModel(Environment):
         self.history = np.concatenate((self.history, np.array([self.x])))  # save current state
         self.tt.extend([self.tt[-1] + dt])  # increment simulation time
         self.terminated = self.terminate(self.x)
-        x_2pi = mapAngles(self.xIsAngle, self.x_)
-        x2pi = mapAngles(self.xIsAngle, self.x)
-        c = (self.cost(x_2pi, u, x2pi, np) + self.terminal_cost*self.terminated)*dt
+        t = self.tt[-1]
+        c = (self.cost(self.x_, u, self.x, t, np) + self.terminal_cost*self.terminated)*dt
         return c
 
     def observe(self, x):
@@ -368,20 +391,92 @@ class Pendulum(StateSpaceModel):
                                       blit=True)
         return ani
 
-class CartPole(StateSpaceModel):
+class AngularPendulum(StateSpaceModel):
+
     def __init__(self, cost, x0, dt):
-        self.ode = cart_pole_ode()
+        super(AngularPendulum, self).__init__(self.ode, cost, x0, 1, dt)
+        self.xIsAngle = [False, False, False]
+        self.o = self.observe(self.x)
+        self.o_ = self.o
+        self.oDim = len(self.o)  # observation dimensions
+        self.uMax = 3.5*np.ones(1)
+
+    @staticmethod
+    def ode(t, x, u):
+
+        g = 9.81  # gravity
+        b = 0.02  # dissipation
+        u1, = u  # torque
+        x1, x2, x3 = x
+
+        dx1dt = -x2*x3
+        dx2dt = x1*x3
+        dx3dt = u1 + g*x2 - b*x3
+
+        return np.array([dx1dt, dx2dt, dx3dt])
+
+    def terminate(self, x):
+        x1, x2, x3 = x
+        if abs(x3) > 10:
+            return True
+        else:
+            return False
+
+
+    def animation(self):
+        # mapping from theta and s to the x,y-plane (definition of the line points, that represent the pole)
+        def pendulum_plot(l, xt):
+            x_pole_end = -l * xt[:, 1]
+            y_pole_end = l * xt[:, 0]
+
+            return x_pole_end, y_pole_end
+
+        # line and text
+        def animate(t):
+            thisx = [0, x_pole_end[t]]
+            thisy = [0, y_pole_end[t]]
+
+            pole.set_data(thisx, thisy)
+            time_text.set_text(time_template % self.tt[t])
+            return pole, time_text,
+
+        x_pole_end, y_pole_end  = pendulum_plot(0.5, self.history)
+        fig, ax = plt.subplots()
+        ax.set_aspect('equal')
+        plt.ylim((-.6, .6))
+        plt.xlim((-.6, .6))
+        plt.title('Pendulum')
+        plt.xticks([], [])
+        plt.yticks([], [])
+        time_template = 'time = %.1fs'
+        time_text = ax.text(0.05, 1.05, '', transform=ax.transAxes)
+        pole, = ax.plot([], [], 'b-', zorder=1, lw=3)
+        circ = patches.Circle((0, 0), 0.03, fc='b', zorder=1)
+        ax.add_artist(circ)
+        # animation using matplotlibs animation library
+        ani = animation.FuncAnimation(fig, animate, np.arange(len(self.tt)), interval=self.tt[1] * 1000,
+                                      blit=True)
+        return ani
+
+class CartPole(StateSpaceModel):
+    def __init__(self, cost, x0, dt, linearized=True):
+        self.ode, self.A, self.B = cart_pole_ode(linearized=linearized)
         super(CartPole, self).__init__(self.ode, cost, x0, 1, dt)
         self.xIsAngle = [False, True, False, False]
         self.o = observation(self.x, self.xIsAngle)
         self.oDim = len(self.o)  # observation dimensions
         self.o_ = self.o
-        self.uMax = 10*np.ones(1)
+        if linearized:
+            self.uMax = 10*np.ones(1) # max. acceleration
+        else:
+            self.uMax = 100*np.ones(1) # max. force
+        self.x1Max = 1.2
+        self.x3Max = 4.0
 
 
     def terminate(self, x):
         x1, x2, x3, x4 = x
-        if np.abs(x1) > 1.5:
+        if np.abs(x1) > self.x1Max or np.abs(x3)> self.x3Max:
             return True
         else:
             return False
@@ -411,12 +506,12 @@ class CartPole(StateSpaceModel):
         ax.set_aspect('equal')
         ax.set(xlabel=r'$x_1$')
         plt.ylim((-.6, .6))
-        plt.xlim((min(-1.4, 1.2 * min(x_cart)), max(1.4, 1.2 * max(x_cart))))
+        #plt.xlim((-self.x1Max-0.2, self.x1Max+0.2))
         plt.yticks([], [])
         plt.title('CartPole')
         time_template = 'time = %.1fs'
         time_text = ax.text(0.05, 1.05, '', transform=ax.transAxes)
-        rail, = ax.plot([min(-1, 1.2 * min(x_cart)), max(1, 1.2 * max(x_cart))], [0, 0], 'ks-', zorder=0)
+        rail, = ax.plot([-self.x1Max-0.1, self.x1Max+0.1], [0, 0], 'ks-', zorder=0)
         pole, = ax.plot([], [], 'b-', zorder=1, lw=3)
         cart = patches.Rectangle((-0.1, -0.05), 0.2, 0.1, fc='b', zorder=1)
         ax.add_artist(cart)
@@ -426,25 +521,29 @@ class CartPole(StateSpaceModel):
         return ani
 
 class CartPoleDoubleSerial(StateSpaceModel):
-    def __init__(self, cost, x0, dt, task='swing_up'):
-        self.ode = cart_pole_double_serial_ode()
+    def __init__(self, cost, x0, dt, linearized=True, task='swing_up'):
+        self.ode, self.A, self.B = cart_pole_double_serial_ode(linearized=linearized)
         super(CartPoleDoubleSerial, self).__init__(self.ode, cost, x0, 1, dt)
         self.xIsAngle = [False, True, True, False, False, False]
         self.o = observation(self.x, self.xIsAngle)
         self.oDim = len(self.o) #observation dimensions
         self.o_ = self.o
-        self.uMax = 20*np.ones(1)
+        if linearized:
+            self.uMax = 15*np.ones(1)
+        else:
+            self.uMax = 100*np.ones(1)
         self.task = task
+        self.x1Max = 1.5
 
     def terminate(self, x):
         x1, x2, x3, x4, x5, x6 = x
         if self.task == 'swing_up':
-            if abs(x1) > 1.5 or abs(x5) > 25 or abs(x6) > 25:
+            if abs(x1) > self.x1Max or abs(x5) > 25 or abs(x6) > 25:
                 return True
             else:
                 return False
         elif self.task == 'balance':
-            if abs(x1) > 1.5 or abs(x2) > 1. or abs(x3) > 1. or abs(x5) > 25 or abs(x6) > 25:
+            if abs(x1) > self.x1Max or abs(x2) > 1. or abs(x3) > 1. or abs(x5) > 25 or abs(x6) > 25:
                 return True
             else: 
                 return False
@@ -484,7 +583,7 @@ class CartPoleDoubleSerial(StateSpaceModel):
             plt.title('CartPoleDoubleSerial')
             time_template = 'time = %.1fs'
             time_text = ax.text(0.0, 1.05, '', transform=ax.transAxes)
-            rail, = ax.plot([min(-1, 1.2 * min(x_cart)), max(1, 1.2 * max(x_cart))], [0, 0], 'ks-', zorder=0)
+            rail, = ax.plot([-(self.x1Max+0.2), self.x1Max+0.2], [0, 0], 'ks-', zorder=0)
             pole1, = ax.plot([], [], 'b-', zorder=1, lw=3)
             pole2, = ax.plot([], [], 'b-', zorder=1, lw=3)
             cart = patches.Rectangle((-0.1, -0.05), 0.2, 0.1, fc='b', zorder=1)
@@ -495,18 +594,22 @@ class CartPoleDoubleSerial(StateSpaceModel):
             return ani
 
 class CartPoleDoubleParallel(StateSpaceModel):
-    def __init__(self, cost, x0, dt):
-        self.ode = cart_pole_double_parallel_ode()
+    def __init__(self, cost, x0, dt, linearized=True):
+        self.ode, self.A, self.B = cart_pole_double_parallel_ode(linearized=linearized)
         super(CartPoleDoubleParallel, self).__init__(self.ode, cost, x0, 1, dt)
         self.xIsAngle = [False, True, True, False, False, False]
         self.o = observation(self.x, self.xIsAngle)
         self.oDim = len(self.o) #observation dimensions
         self.o_ = self.o
-        self.uMax = 25*np.ones(1)
+        if linearized:
+            self.uMax = 25 * np.ones(1)
+        else:
+            self.uMax = 100 * np.ones(1)
+        self.x1Max = 1.5
 
     def terminate(self, x):
         x1, x2, x3, x4, x5, x6 = x
-        if abs(x1) > 1.5 or abs(x5) > 25 or abs(x6) > 25:
+        if abs(x1) > self.x1Max or abs(x5) > 25 or abs(x6) > 25:
             return True
         else:
             return False
@@ -544,7 +647,7 @@ class CartPoleDoubleParallel(StateSpaceModel):
             plt.title('CartPoleDoubleParallel')
             time_template = 'time = %.1fs'
             time_text = ax.text(0.05, 1.05, '', transform=ax.transAxes)
-            rail, = ax.plot([min(-1, 1.2 * min(x_cart)), max(1, 1.2 * max(x_cart))], [0, 0], 'ks-', zorder=0)
+            rail, = ax.plot([-(self.x1Max+0.1), self.x1Max+0.1], [0, 0], 'ks-', zorder=0)
             pole1, = ax.plot([], [], 'b-', zorder=1, lw=3)
             pole2, = ax.plot([], [], 'b-', zorder=1, lw=3)
             cart = patches.Rectangle((-0.1, -0.05), 0.2, 0.1, fc='b', zorder=1)
@@ -555,18 +658,22 @@ class CartPoleDoubleParallel(StateSpaceModel):
             return ani
 
 class CartPoleTriple(StateSpaceModel):
-    def __init__(self, cost, x0, dt):
-        self.ode = cart_pole_triple_ode()
+    def __init__(self, cost, x0, dt, linearized=True):
+        self.ode, self.A, self.B  = cart_pole_triple_ode(linearized=linearized)
         super(CartPoleTriple, self).__init__(self.ode, cost, x0, 1, dt)
         self.xIsAngle = [False, True, True, True, False, False, False, False]
         self.o = observation(self.x, self.xIsAngle)
         self.oDim = len(self.o) #observation dimensions
         self.o_ = self.o
-        self.uMax = 20*np.ones(1)
+        if linearized:
+            self.uMax = 20 * np.ones(1)
+        else:
+            self.uMax = 100 * np.ones(1)
+        self.x1Max = 1.5
 
     def terminate(self, x):
         x1, x2, x3, x4, x5, x6, x7, x8 = x
-        if abs(x1) > 1.5:
+        if abs(x1) > self.x1Max:
             return True
         else:
             return False
@@ -609,7 +716,7 @@ class CartPoleTriple(StateSpaceModel):
             plt.title('CartPoleTriple')
             time_template = 'time = %.1fs'
             time_text = ax.text(0.0, 1.05, '', transform=ax.transAxes)
-            rail, = ax.plot([min(-.8, 1.2 * min(x_cart)), max(.8, 1.2 * max(x_cart))], [0, 0], 'ks-', zorder=0)
+            rail, = ax.plot([-(self.x1Max+0.1), self.x1Max+0.1], [0, 0], 'ks-', zorder=0)
             pole1, = ax.plot([], [], 'b-', zorder=1, lw=3)
             pole2, = ax.plot([], [], 'b-', zorder=1, lw=3)
             pole3, = ax.plot([], [], 'b-', zorder=1, lw=3)
@@ -654,14 +761,17 @@ class Car(StateSpaceModel):
             return False
 
 class Acrobot(StateSpaceModel):
-    def __init__(self, cost, x0, dt):
-        self.ode = acrobot_ode()
+    def __init__(self, cost, x0, dt, linearized=True):
+        self.ode, self.A, self.B = acrobot_ode(linearized=linearized)
         super(Acrobot, self).__init__(self.ode, cost, x0, 1, dt)
         self.xIsAngle = [True, True, False, False]
         self.o = observation(self.x, self.xIsAngle)
         self.oDim = len(self.o)  # observation dimensions
         self.o_ = self.o
-        self.uMax = 5*np.ones(1)
+        if linearized:
+            self.uMax = 50*np.ones(1)
+        else:
+            self.uMax = 5*np.ones(1)
 
 
     def terminate(self, x):

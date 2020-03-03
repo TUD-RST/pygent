@@ -168,14 +168,14 @@ class DDPG(Algorithm):
                 break
         return cost, disc_cost
 
-    def run_learning(self, steps, n=int(1e5)):
+    def run_learning(self, steps, max_episodes=int(1e5)):
         """ Learning process.
 
             Args:
                 steps (int): number of steps
                 n (int): number of episodes
         """
-        for k in range(1, n + 1):
+        for k in range(1, int(max_episodes) + 1):
             if steps > self.R.data.__len__():
                 total_cost, episode_steps = self.run_episode()
                 # plot environment after episode finished
@@ -212,11 +212,13 @@ class DDPG(Algorithm):
         # save learning curve data
         learning_curve_dict = {'totalCost': self.totalCost, 'meanCost':self.meanCost,
                                'expCost': self.expCost, 'episode_steps': self.episode_steps}
-        pickle.dump(learning_curve_dict, open(self.path + 'data/learning_curve.p', 'wb'))
+        with open(self.path + 'data/learning_curve.p', 'wb') as opened_file:
+            pickle.dump(learning_curve_dict, opened_file)
         
         # save seed values of random number generators
         seed_dict = {'np_seed': np.random.get_state(), 'torch_seed': torch.get_rng_state()}
-        pickle.dump(seed_dict, open(self.path + 'data/seeds.p', 'wb'))
+        with open(self.path + 'data/seeds.p', 'wb') as opened_file:
+            pickle.dump(seed_dict, opened_file)
 
         print('Network parameters, data set and learning curve saved.')
 
@@ -237,7 +239,8 @@ class DDPG(Algorithm):
 
         # load learning curve
         if os.path.isfile(self.path + 'data/learning_curve.p'):
-            learning_curve_dict = pickle.load(open(self.path + 'data/learning_curve.p', 'rb'))
+            with open(self.path + 'data/learning_curve.p', 'rb') as opened_file:
+                learning_curve_dict = pickle.load(opened_file)
             self.meanCost = learning_curve_dict['meanCost']
             self.totalCost = learning_curve_dict['totalCost']
             self.expCost = learning_curve_dict['expCost']
@@ -248,7 +251,8 @@ class DDPG(Algorithm):
             print('No learning curve data found!')
         # load seed values for random number generators
         if os.path.isfile(self.path + 'data/seeds.p'):
-            seed_dict = pickle.load(open(self.path + 'data/seeds.p', 'rb'))
+            with open(self.path + 'data/seeds.p', 'rb') as opened_file:
+                seed_dict = pickle.load(opened_file)
             np.random.set_state(seed_dict['np_seed'])
             torch.set_rng_state(seed_dict['torch_seed'])
         pass
@@ -478,7 +482,7 @@ class ActorCriticDDPG(Agent):
         """
 
         self.eval()
-        x = torch.Tensor([x])
+        x = torch.Tensor(x).reshape(1, self.xDim)
         if torch.cuda.is_available():
             x = x.cuda()
         self.u = np.asarray(self.actor1(x).detach().cpu())[0]
@@ -498,7 +502,7 @@ class ActorCriticDDPG(Agent):
         """
 
         self.eval()
-        x = torch.Tensor([x])
+        x = torch.Tensor(x).reshape(1, self.xDim)
         if torch.cuda.is_available():
             x = x.cuda()
         #noise = self.noise.sample()
@@ -537,7 +541,7 @@ class ActorCriticDDPG(Agent):
                 qTargets (torch.Tensor): target value tensor for the Q-network
         """
 
-        batch = dataSet.minibatch(self.batch_size)
+        batch = dataSet.random_batch(self.batch_size)
         x_Inputs = torch.Tensor([sample['x_'] for sample in batch])
         xInputs = torch.Tensor([sample['x'] for sample in batch])
         uInputs = torch.Tensor([sample['u'] for sample in batch])
@@ -549,7 +553,7 @@ class ActorCriticDDPG(Agent):
             costs = costs.cuda()
             terminated = terminated.cuda()
         nextQ = self.critic2(xInputs, self.actor2(xInputs)).detach()
-        qTargets = costs + self.gamma*(1 - terminated*False)*nextQ #this should actually be (1 - terminated), but somehow this way training is faster and more stable.
+        qTargets = costs + self.gamma*(1 - terminated*False)*nextQ #this should actually be (1 - terminated), but somehow this way training is more stable.
         qTargets = torch.squeeze(qTargets)
         if torch.cuda.is_available():
             x_Inputs = x_Inputs.cuda()

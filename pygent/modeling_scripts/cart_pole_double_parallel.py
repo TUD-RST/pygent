@@ -8,7 +8,7 @@ except ImportError:
     print('sympy-to-c could not be imported!')
 import pickle
 
-def modeling():
+def modeling(linearized=True):
     t = sp.Symbol('t') # time
     params = sp.symbols('m0, m1, m2, J1, J2, l1, l2, g, d0, d1, d2') # system parameters
     m0, m1, m2, J1, J2, l1, l2, g, d0, d1, d2 = params
@@ -49,8 +49,6 @@ def modeling():
 
     # lagrangian L
     L = T - V
-    L = L.expand()
-    L = sp.trigsimp(L)
 
     # Lagrange equations of the second kind
     # d/dt(dL/d(dq_i/dt)) - dL/dq_i = Q_i
@@ -66,12 +64,26 @@ def modeling():
     # equations of motion
     Eq = sp.Matrix([Eq0, Eq1, Eq2])
 
+    # partial linerization / acceleration as input, not force/torque
+    # new input - acceleration of the cart
+    a = sp.Function('a')(t)
+
+    # replace ddq0 with a
+    Eq_a = Eq.subs(ddq0_t, a)
+
+    # solve for F
+    sol = sp.solve(Eq_a, F)
+    Fa = sol[F]  # F(a)
+
+    # partial linearization
+    Eq_lin = Eq.subs(F, Fa)
+
+    # solve for ddq/dt
     ddq_t = sp.Matrix([ddq0_t, ddq1_t, ddq2_t])
-    M = Eq.jacobian(ddq_t)
-
-    q_zeros = [(ddq0_t, 0), (ddq1_t, 0), (ddq2_t, 0)]
-    ddq = M.inv()* -Eq.subs(q_zeros)
-
+    if linearized:
+        ddq = sp.solve(Eq_lin, ddq_t)
+    else:
+        ddq = sp.solve(Eq, ddq_t)
     # state space model
 
     # functions of x, u
@@ -90,12 +102,14 @@ def modeling():
     xx = [x1, x2, x3, x4, x5, x6]
 
     # replace generalized coordinates with states
-    xu_subs = [(dq0_t, x4_t), (dq1_t, x5_t), (dq2_t, x6_t), (q0_t, x1_t), (q1_t, x2_t), (q2_t, x3_t), (F, u_t)]
-    ddq = ddq.subs(xu_subs)
+    if linearized:
+        xu_subs = [(dq0_t, x4_t), (dq1_t, x5_t), (dq2_t, x6_t), (q0_t, x1_t), (q1_t, x2_t), (q2_t, x3_t), (a, u_t)]
+    else:
+        xu_subs = [(dq0_t, x4_t), (dq1_t, x5_t), (dq2_t, x6_t), (q0_t, x1_t), (q1_t, x2_t), (q2_t, x3_t), (F, u_t)]
 
     # first order ODE (right hand side)
-    dx_t = sp.Matrix([x4_t, x5_t, x6_t, ddq[0], ddq[1], ddq[2]])
-
+    dx_t = sp.Matrix([x4_t, x5_t, x6_t, ddq[ddq0_t], ddq[ddq1_t], ddq[ddq2_t]])
+    dx_t = dx_t.subs(xu_subs)
     # linearized dynamics
     A = dx_t.jacobian(x_t)
     B = dx_t.diff(u_t)
@@ -104,39 +118,70 @@ def modeling():
     Asym = A.subs(list(zip(x_t, xx))).subs(u_t, u).subs(params_values)
     Bsym = B.subs(list(zip(x_t, xx))).subs(u_t, u).subs(params_values)
 
-    # callable functions
-    A_func = sp.lambdify((x2, x3, x4, x5, x6, u), Asym, modules="numpy")
-    B_func = sp.lambdify((x2, x3), Bsym, modules="numpy")
-
-    dx_t_sym = dx_t.subs(list(zip(x_t, xx))).subs(u_t, u).subs(params_values) # replacing all symbolic functions with symbols
-
+    dx_t_sym = dx_t.subs(list(zip(x_t, xx))).subs(u_t, u).subs(
+        params_values)  # replacing all symbolic functions with symbols
+    print(dx_t_sym)
+    if linearized:
+        lin = '_lin'
+    else:
+        lin = ''
+    with open('c_files/cart_pole_double_parallel' + lin + '_ode.p', 'wb') as opened_file:
+        pickle.dump(dx_t_sym, opened_file)
+    with open('c_files/cart_pole_double_parallel' + lin + '_A.p', 'wb') as opened_file:
+        pickle.dump(Asym, opened_file)
+    with open('c_files/cart_pole_double_parallel' + lin + '_B.p', 'wb') as opened_file:
+        pickle.dump(Bsym, opened_file)
     # RHS as callable function
-    try: # use c-code
-        dx_c_func = sp2c.convert_to_c((x1, x2, x3, x4, x5, x6, u), dx_t_sym, cfilepath="c_files/cart_pole_double_parallel.c",
-                                      use_exisiting_so=False)
-        dxdt = lambda t, x, u: dx_c_func(*x, *u).T[0]
+    dxdt, A, B = load_existing()
 
-    except:
-        print('C-function of systems ODE could not be created')
-        dx_func = sp.lambdify((x1, x2, x3, x4, x5, x6, u), dx_t_sym[:], modules="numpy")  # creating a callable python function
-        dxdt = lambda t, x, u: np.array(dx_func(*x, *u))
-    
-    return dxdt
+    return dxdt, A, B
 
-def load_existing():
+
+def load_existing(linearized=True):
+    if linearized:
+        lin = '_lin'
+    else:
+        lin = ''
+    path = os.path.dirname(os.path.abspath(__file__))
+    x1, x2, x3, x4, x5, x6, u = sp.symbols("x1, x2, x3, x4, x5, x6, u")
+    with open(path + '/c_files/cart_pole_double_parallel' + lin + '_ode.p', 'rb') as opened_file:
+        dx_t_sym = pickle.load(opened_file)
+        print('Model loaded')
+    with open(path + '/c_files/cart_pole_double_parallel' + lin + '_A.p', 'rb') as opened_file:
+        Asym = pickle.load(opened_file)
+        print('A matrix loaded')
+    with open(path + '/c_files/cart_pole_double_parallel' + lin + '_B.p', 'rb') as opened_file:
+        Bsym = pickle.load(opened_file)
+        print('B matrix loaded')
     try:
-        x1, x2, x3, x4, x5, x6, u = sp.symbols("x1, x2, x3, x4, x5, x6, u")
-        dx_t_sym = sp.Matrix([[0], [0], [0], [0], [0], [0]])
-        dx_c_func = sp2c.convert_to_c((x1, x2, x3, x4, x5, x6, u), dx_t_sym, cfilepath="c_files/cart_pole_double_parallel.c",
-                                      use_exisiting_so=True)
+        dx_c_func = sp2c.convert_to_c((x1, x2, x3, x4, x5, x6, u), dx_t_sym,
+                                      cfilepath=path + '/c_files/cart_pole_double_parallel' + lin + '.c',
+                                      use_exisiting_so=False)
+        A_c_func = sp2c.convert_to_c((x1, x2, x3, x4, x5, x6, u), Asym,
+                                     cfilepath=path + '/c_files/cart_pole_double_parallel' + lin + '_A.c',
+                                     use_exisiting_so=False)
+        B_c_func = sp2c.convert_to_c((x1, x2, x3, x4, x5, x6, u), Bsym,
+                                     cfilepath=path + '/c_files/cart_pole_double_parallel' + lin + '_B.c',
+                                     use_exisiting_so=False)
+        A = lambda x, u: A_c_func(*x, *u)
+        B = lambda x, u: B_c_func(*x, *u)
         dxdt = lambda t, x, u: dx_c_func(*x, *u).T[0]
         assert (any(dxdt(0, [0, 0, 0, 1., 1., 1.], [0]) != [0., 0., 0., 0., 0., 0.]))
-        print('Model loaded')
+        print('Using C-function')
     except:
-        print('Model could not be loaded! Rerunning model creation!')
-        dxdt = modeling()
-    return dxdt
+        A_func = sp.lambdify((x1, x2, x3, x4, x5, x6, u), Asym, modules="numpy")
+        B_func = sp.lambdify((x1, x2, x3, x4, x5, x6, u), Bsym, modules="numpy")
+        A = lambda x, u: A_func(*x, *u)
+        B = lambda x, u: B_func(*x, *u)
+
+        dx_func = sp.lambdify((x1, x2, x3, x4, x5, x6, u), dx_t_sym[:],
+                              modules="numpy")  # creating a callable python function
+        dxdt = lambda t, x, u: np.array(dx_func(*x, *u))
+        assert (any(dxdt(0, [0, 0, 0, 1., 1., 1.], [0]) != [0., 0., 0., 0., 0., 0.]))
+        print('Using lambdify')
+    return dxdt, A, B
+
 
 if __name__ == "__main__":
     # execute only if run as a script
-    modeling()
+    modeling(linearized=False)

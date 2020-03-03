@@ -48,6 +48,9 @@ class DataSet(object):
         """ Adds sample to data set without checking for duplicates."""
 
         self.data.append(sample)
+        # if data set exceeds length, pop first value (FIFO)
+        if self.length < self.data.__len__():
+            del self.data[0]
         return True
 
     def rm_sample(self, sample):
@@ -80,19 +83,48 @@ class DataSet(object):
 
         return sample
 
-    def minibatch(self, n):
+    def random_batch(self, n):
         """ Samples a minibatch of size 'n' from the data set.
 
             Args:
                 n(int): size of the minibatch
 
             Returns:
-                minibatch (list): batch of 'n' samples
+                random_batch (list): batch of 'n' samples
             """
 
-        #minibatch = random.sample(self.data, min(n, len(self.data)))
-        minibatch = np.random.choice(self.data, min(n, len(self.data)))
-        return minibatch
+        random_batch = np.random.choice(self.data, min(n, len(self.data)))
+        return random_batch
+
+    def shuffled_batches(self, n):
+        """ Returns a list of shuffled batches of size n from the dataset"""
+        idxs = np.arange(self.data.__len__())
+        np.random.shuffle(idxs)
+        batches = []
+        for i in range(max(1, int(self.data.__len__()/n))):
+            idx = idxs[i*n:(i+1)*n]
+            batch = [self.data[id] for id in idx]
+            batches.append(batch)
+        # add last batch of size < n
+        if self.data.__len__() % n != 0:
+            idx = idxs[(i+1)* n::]
+            batch = [self.data[id] for id in idx]
+            batches.append(batch)
+        return batches
+
+    def batches(self, n):
+        """ Returns a list of batches of size n from the dataset"""
+        idxs = np.arange(self.data.__len__())
+        batches = []
+        for i in range(int(self.data.__len__() / n)):
+            idx = idxs[i * n:(i + 1) * n]
+            batch = [self.data[id] for id in idx]
+            batches.append(batch)
+        # add last batch of size < n
+        idx = idxs[(i + 1) * n::]
+        batch = [self.data[id] for id in idx]
+        batches.append(batch)
+        return batches
 
     def save(self, path):
         """ Save data in file.
@@ -100,8 +132,8 @@ class DataSet(object):
             Args:
                 path (string): 'directory/filename.p'
             """
-
-        pickle.dump(self.data, open(path, 'wb'))
+        with open(path, 'wb') as opened_file:
+            pickle.dump(self.data, opened_file)
         pass
 
     def load(self, path):
@@ -110,5 +142,6 @@ class DataSet(object):
             Args:
                 path (string): 'directory/filename.p'
             """
-        self.data = pickle.load(open(path, 'rb'))
+        with open(path, 'rb') as opened_file:
+            self.data += pickle.load(opened_file)
         pass

@@ -4,8 +4,10 @@ import torch
 torch.manual_seed(0)
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import pickle
 
-from pygent.helpers import fanin_init
+from pygent.helpers import fanin_init, observation
 
 class MLP(nn.Module):
     """ Multilayer perceptron (MLP) with tanh/sigmoid activation functions implemented in PyTorch
@@ -148,25 +150,39 @@ class Actor(nn.Module):
         return y
 
 class NNDynamics(nn.Module):
-    def __init__(self, xDim, uDim):
+    def __init__(self, xDim, uDim, dxDim=None, oDim=None, xIsAngle=None):
         super(NNDynamics, self).__init__()
         self.xDim = xDim
+        if oDim == None:
+            self.oDim = xDim
+        else:
+            self.oDim = oDim
+        if dxDim == None: 
+            self.dxDim = xDim
+        else:
+            self.dxDim = int(dxDim)
         self.uDim = uDim
-        self.layer1 = nn.Linear(xDim + uDim, 500)
+        if xIsAngle == None:
+            self.xIsAngle = [False]*xDim
+        else:
+            self.xIsAngle = xIsAngle
+        # mean/var values
+        self.uMean = torch.zeros((1, self.uDim))
+        self.uVar = torch.ones((1, self.uDim))
+        self.oMean = torch.zeros((1, self.oDim))
+        self.oVar = torch.ones((1, self.oDim))
+        self.xMean = torch.zeros((1, self.xDim))
+        self.xVar = torch.ones((1, self.xDim))
+        self.dxMean = torch.zeros((1, self.dxDim))
+        self.dxVar = torch.ones((1, self.dxDim))
+
+        self.layer1 = nn.Linear(self.oDim + self.uDim, 500)
         self.layer2 = nn.Linear(500, 500)
-        self.layer3 = nn.Linear(500, xDim)
+        self.layer3 = nn.Linear(500, self.dxDim)
 
-        # weight initialization
-        wMin = -3.0*1e-3
-        wMax = 3.0*1e-3
-        fanin_init(self.layer1)
-        fanin_init(self.layer2)
-        self.layer3.weight = torch.nn.init.uniform_(self.layer3.weight, a=wMin, b=wMax)
-        self.layer3.bias = torch.nn.init.uniform_(self.layer3.bias, a=wMin, b=wMax)
-
-    def forward(self, x, u):
+    def forward(self, o, u):
         # connect layers
-        h1_in = torch.cat((x, u), 1)
+        h1_in = torch.cat((o, u), 1)
         h1 = self.layer1(h1_in)
         h1_out = F.relu(h1)
         h2 = self.layer2(h1_out)
@@ -174,3 +190,40 @@ class NNDynamics(nn.Module):
         y = self.layer3(h2_out)
         return y
 
+    def ode(self, x, u):
+        self.eval()
+        o = observation(x, self.xIsAngle)
+        o = torch.Tensor(o).reshape(1, self.oDim)
+        o = (o - self.oMean) / self.oVar
+        u = torch.Tensor(u).reshape(1, self.uDim)
+        u = (u - self.uMean) / self.uVar
+        dxdt = self.forward(o, u).detach()
+        dxdt = (dxdt*self.dxVar + self.dxMean).numpy()
+        return dxdt[0]
+
+    def save_moments(self, filename, path):
+        moments_dict = {'xMean': self.xMean,
+                'xVar': self.xVar,
+                'uMean': self.uMean,
+                'uVar': self.uVar,
+                'oMean': self.oMean,
+                'oVar': self.oVar,
+                'dxMean': self.dxMean,
+                'dxVar': self.dxVar}
+        with open(path + 'data/moments_dict.p', 'wb') as opened_file:
+            pickle.dump(moments_dict, opened_file)
+        with open(path + 'data/moments_dict' + filename +'.p', 'wb') as opened_file:
+            pickle.dump(moments_dict, opened_file)
+        pass
+
+    def load_moments(self, path):
+        with open(path + 'data/moments_dict.p', 'rb') as opened_file:
+            moments_dict = pickle.load(opened_file)
+        self.xMean = moments_dict['xMean']
+        self.xVar = moments_dict['xVar']
+        self.uMean = moments_dict['uMean']
+        self.uVar = moments_dict['uVar']
+        self.oMean = moments_dict['oMean']
+        self.oVar = moments_dict['oVar']
+        self.dxMean = moments_dict['dxMean']
+        self.dxVar = moments_dict['dxVar']
